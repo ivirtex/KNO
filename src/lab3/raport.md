@@ -2,8 +2,6 @@
 
 ## Opis modeli
 
-Zaimplementowano i przetestowano dwa modele sieci neuronowych do klasyfikacji win:
-
 1.  **Model Prosty**:
     *   **Architektura**: Jedna warstwa ukryta (16 neuronów, aktywacja ReLU) oraz warstwa wyjściowa (3 neurony, aktywacja Softmax).
     *   **Liczba parametrów**: 275.

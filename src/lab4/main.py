@@ -3,6 +3,8 @@ import pandas as pd
 from pathlib import Path
 import numpy as np
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
 import keras
 import keras_tuner as kt
 
@@ -10,12 +12,10 @@ EPOCHS = 100
 BATCH_SIZE = 16
 SEED = 42
 
-# Complex model baseline from lab3
-BASELINE = {
-    "test_accuracy": 0.9444,
-    "test_auc": 0.9952,
-    "test_loss": 0.2211,
-}
+# Best model from lab3
+BASELINE_TEST_ACCURACY = 0.9444
+BASELINE_TEST_LOSS = 0.2211
+BASELINE_TEST_AUC = 0.9952
 
 
 def load_wine_data():
@@ -64,24 +64,20 @@ def load_wine_data():
     print(f"Train set: {X_train.shape[0]} samples")
     print(f"Test set: {X_test.shape[0]} samples")
 
-    # Create and adapt normalization layer
     normalizer = keras.layers.Normalization(axis=-1)
     normalizer.adapt(X_train)
 
     return X_train, X_test, y_train, y_test, normalizer
 
 
-def create_model(normalizer, learning_rate, hidden_units_1, dropout_rate):
+def create_model(normalizer, learning_rate, hidden_units_1, activation):
     model = keras.Sequential(
         [
             keras.layers.InputLayer(shape=(13,), name="input_layer"),
             normalizer,
             keras.layers.Dense(
-                hidden_units_1, activation="relu", name="hidden_layer_1"
+                hidden_units_1, activation=activation, name="hidden_layer_1"
             ),
-            keras.layers.Dropout(dropout_rate, name="dropout_1"),
-            keras.layers.Dense(32, activation="relu", name="hidden_layer_2"),
-            keras.layers.Dropout(dropout_rate / 2, name="dropout_2"),
             keras.layers.Dense(3, activation="softmax", name="output_layer"),
         ],
         name="wine_classifier",
@@ -107,22 +103,20 @@ def build_model_with_hp(hp, normalizer):
     hidden_units_1 = hp.Int(
         "hidden_units_1",
         min_value=16,
-        max_value=128,
-        step=32,
+        max_value=64,
+        step=16,
     )
 
-    dropout_rate = hp.Float(
-        "dropout_rate",
-        min_value=0.0,
-        max_value=0.4,
-        step=0.1,
+    activation = hp.Choice(
+        "activation",
+        values=["relu", "tanh", "sigmoid"],
     )
 
     return create_model(
         normalizer=normalizer,
         learning_rate=learning_rate,
         hidden_units_1=hidden_units_1,
-        dropout_rate=dropout_rate,
+        activation=activation,
     )
 
 
@@ -134,108 +128,122 @@ def evaluate_model(model, X_test, y_test):
     test_accuracy = test_results[1]
     test_auc = test_results[2]
 
-    return {
-        "loss": test_loss,
-        "accuracy": test_accuracy,
-        "auc": test_auc,
-    }
+    return test_loss, test_accuracy, test_auc
+
+
+def plot_confusion_matrix(model, X_test, y_test, save_path="confusion_matrix.png"):
+    # Get predictions
+    y_pred = model.predict(X_test, verbose=0)
+
+    # Convert one-hot encoded labels to class indices
+    y_true_classes = np.argmax(y_test, axis=1)
+    y_pred_classes = np.argmax(y_pred, axis=1)
+
+    # Compute confusion matrix
+    cm = confusion_matrix(y_true_classes, y_pred_classes)
+
+    # Display confusion matrix
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=cm, display_labels=["Class 1", "Class 2", "Class 3"]
+    )
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    disp.plot(ax=ax, values_format="d")
+    plt.title("Confusion Matrix - Wine Classification")
+    plt.tight_layout()
+
+    # Save figure
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    print(f"\nConfusion matrix saved to: {save_path}")
+
+    plt.close()
+
+    return cm
 
 
 def tune_hyperparameters(X_train, y_train, normalizer):
     tuner = kt.Hyperband(
         hypermodel=lambda hp: build_model_with_hp(hp, normalizer),
-        objective="val_auc",
-        max_epochs=EPOCHS,
-        factor=3,
-        hyperband_iterations=2,
-        project_name="wine_classification",
+        objective="val_loss",
     )
 
     tuner.search_space_summary()
-
-    callbacks = [
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=15,
-            restore_best_weights=True,
-        ),
-    ]
 
     tuner.search(
         X_train,
         y_train,
         epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
         validation_split=0.2,
-        callbacks=callbacks,
         verbose=1,
     )
 
-    best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+    tuner.results_summary()
 
-    print("\nBest hyperparameters found:")
-    print(f"Learning Rate:    {best_hps.get('learning_rate'):.6f}")
-    print(f"Hidden Units 1:   {best_hps.get('hidden_units_1')}")
-    print(f"Dropout Rate:     {best_hps.get('dropout_rate'):.2f}")
+    best_hps = tuner.get_best_hyperparameters()[0]
 
-    return best_hps, tuner
+    return best_hps
 
 
 def main() -> int:
-    # Load and preprocess data
     X_train, X_test, y_train, y_test, normalizer = load_wine_data()
 
     print("\n1. Tuning hyperparameters...")
-    best_hps, tuner = tune_hyperparameters(X_train, y_train, normalizer)
+    best_hps = tune_hyperparameters(X_train, y_train, normalizer)
 
-    # Build and train best model
     best_model = create_model(
         normalizer=normalizer,
         learning_rate=best_hps.get("learning_rate"),
         hidden_units_1=best_hps.get("hidden_units_1"),
-        dropout_rate=best_hps.get("dropout_rate"),
+        activation=best_hps.get("activation"),
     )
 
     print("\n2. Training optimized model...")
-    callbacks = [
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=20,
-            restore_best_weights=True,
-        ),
-    ]
-
     best_model.fit(
         X_train,
         y_train,
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
         validation_split=0.2,
-        callbacks=callbacks,
         verbose=1,
     )
 
-    # Evaluate best model
-    print("\n3. Evaluating optimized model...")
-    tuned_results = evaluate_model(best_model, X_test, y_test)
+    best_model.summary()
+    print(
+        f"Best hyperparameters: "
+        f"learning_rate={best_hps.get('learning_rate')}, "
+        f"hidden_units_1={best_hps.get('hidden_units_1')}, "
+        f"activation={best_hps.get('activation')}"
+    )
 
-    # Compare results
+    print("\n3. Evaluating optimized model...")
+    test_loss, test_accuracy, test_auc = evaluate_model(best_model, X_test, y_test)
+
+    print("\n4. Generating confusion matrix...")
+    cm = plot_confusion_matrix(best_model, X_test, y_test, "confusion_matrix.png")
+
     print(f"\n{'Metric':<20} {'Baseline':<15} {'Tuned':<15} {'Improvement'}")
     print("-" * 60)
 
-    accuracy_improvement = tuned_results["accuracy"] - BASELINE["test_accuracy"]
-    auc_improvement = tuned_results["auc"] - BASELINE["test_auc"]
+    loss_improvement = BASELINE_TEST_LOSS - test_loss
+    accuracy_improvement = test_accuracy - BASELINE_TEST_ACCURACY
+    auc_improvement = test_auc - BASELINE_TEST_AUC
 
     print(
+        f"{'Test Loss':<20} "
+        f"{BASELINE_TEST_LOSS:>6.4f}          "
+        f"{test_loss:>6.4f}          "
+        f"{loss_improvement:>+.4f}"
+    )
+    print(
         f"{'Test Accuracy':<20} "
-        f"{BASELINE['test_accuracy']:>6.4f} ({BASELINE['test_accuracy'] * 100:>5.2f}%)  "
-        f"{tuned_results['accuracy']:>6.4f} ({tuned_results['accuracy'] * 100:>5.2f}%)  "
+        f"{BASELINE_TEST_ACCURACY:>6.4f} ({BASELINE_TEST_ACCURACY * 100:>5.2f}%)  "
+        f"{test_accuracy:>6.4f} ({test_accuracy * 100:>5.2f}%)  "
         f"{accuracy_improvement:>+.4f} ({accuracy_improvement * 100:>+6.2f}%)"
     )
     print(
         f"{'Test AUC':<20} "
-        f"{BASELINE['test_auc']:>6.4f}          "
-        f"{tuned_results['auc']:>6.4f}          "
+        f"{BASELINE_TEST_AUC:>6.4f}          "
+        f"{test_auc:>6.4f}          "
         f"{auc_improvement:>+.4f}"
     )
 
